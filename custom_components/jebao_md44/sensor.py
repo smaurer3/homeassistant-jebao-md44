@@ -49,7 +49,7 @@ async def async_setup_entry(
             MD44ScheduleCountSensor(coordinator, device_id, model, host, idx, mac_address, firmware_version)
         )
         entities.append(
-            MD44NextScheduleSensor(coordinator, device_id, model, host, idx, mac_address, firmware_version)
+            MD44NextScheduleSensor(coordinator, device_id, model, host, idx, entry, mac_address, firmware_version)
         )
     async_add_entities(entities)
 
@@ -171,23 +171,47 @@ class MD44ScheduleCountSensor(JebaoEntity, SensorEntity):
 
 
 class MD44NextScheduleSensor(JebaoEntity, SensorEntity):
-    """The next-up schedule entry for one channel, as HH:MM (Qmg)."""
+    """The next-up schedule entry for one channel, as ``HH:MM (Q mL)``.
+
+    Reports ``Disabled`` when the channel's timer switch is off: the pump
+    only runs a channel's stored schedule while that timer is enabled, so
+    showing a next-dose time would promise a dose that will never happen.
+
+    Quantities are scaled by the 10x precision factor, so they read as real
+    mL and agree with the channel's schedule text entity.
+    """
 
     _attr_icon = "mdi:clock-time-four-outline"
+    STATE_DISABLED = "Disabled"
 
-    def __init__(self, coordinator, device_id, model, host, idx, mac_address=None, firmware_version=None) -> None:
+    def __init__(self, coordinator, device_id, model, host, idx, entry, mac_address=None, firmware_version=None) -> None:
         super().__init__(coordinator, device_id, model, host, mac_address, firmware_version)
         self._idx = idx
+        self._entry = entry
         ch = idx + 1
         self._attr_unique_id = f"{device_id}_next_sched_{ch}"
         self._attr_name = f"Channel {ch} next dose"
         self._attr_translation_key = f"next_sched_{ch}"
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # Re-render when the 10x toggle flips; it changes the displayed
+        # quantity without touching the coordinator's data.
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                signal_cal_factor_changed(self._entry.entry_id),
+                self.async_write_ha_state,
+            )
+        )
 
     @property
     def native_value(self) -> str | None:
         state = self.coordinator.data.get("state")
         if state is None:
             return None
+        if not state.timers_enabled[self._idx]:
+            return self.STATE_DISABLED
         entries = state.schedules[self._idx]
         if not entries:
             return None
@@ -198,7 +222,9 @@ class MD44NextScheduleSensor(JebaoEntity, SensorEntity):
         upcoming = [e for e in sorted_entries if (e.hour, e.minute) >= (now.hour, now.minute)]
         nxt = upcoming[0] if upcoming else sorted_entries[0]
         suffix = "" if upcoming else " (tomorrow)"
-        return f"{nxt.hour:02d}:{nxt.minute:02d} ({nxt.quantity_ml:g} mL){suffix}"
+        factor = cal_factor(self._entry.options)
+        qty = nxt.quantity / factor if factor != 1 else nxt.quantity
+        return f"{nxt.hour:02d}:{nxt.minute:02d} ({qty:g} mL){suffix}"
 
 
 class MD44DoseAppValueSensor(JebaoEntity, SensorEntity):
