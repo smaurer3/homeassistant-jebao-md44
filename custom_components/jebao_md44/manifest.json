@@ -4,10 +4,13 @@
   "codeowners": ["@smaurer3"],
   "config_flow": true,
   "dependencies": [],
+  "dhcp": [
+    {"registered_devices": true}
+  ],
   "documentation": "https://github.com/smaurer3/homeassistant-jebao-md44",
   "integration_type": "device",
-  "iot_class": "cloud_push",
+  "iot_class": "local_push",
   "issue_tracker": "https://github.com/smaurer3/homeassistant-jebao-md44/issues",
   "requirements": [],
-  "version": "1.0.0"
+  "version": "2.0.0"
 }

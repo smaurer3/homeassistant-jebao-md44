@@ -128,7 +128,7 @@ class MD44IntervalDaysSensor(JebaoEntity, NumberEntity):
             self.async_write_ha_state()
             return
 
-        ws_on = getattr(self._device, "ws_connected", False)
+        ws_on = getattr(self._device, "push_active", False)
         # WS connected: cloud pushes the new value back within ~1 s, so
         # we just wait short intervals and check. WS down: poll via REST.
         delays = (2.0, 3.0, 5.0) if ws_on else (5.0, 4.0, 4.0)

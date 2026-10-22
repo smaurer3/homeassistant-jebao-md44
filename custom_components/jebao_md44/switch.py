@@ -144,7 +144,7 @@ class _MD44SwitchBase(JebaoEntity, SwitchEntity):
             self._clear_optimistic()
             raise err
 
-        ws_on = getattr(self._device, "ws_connected", False)
+        ws_on = getattr(self._device, "push_active", False)
         delays = VERIFY_RETRY_DELAYS_PUSH if ws_on else VERIFY_RETRY_DELAYS_POLL
 
         async def _verify() -> None:

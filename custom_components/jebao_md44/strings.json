@@ -2,90 +2,159 @@
   "config": {
     "step": {
       "user": {
-        "title": "Jebao MD-4.4 Doser Setup",
-        "description": "The MD-4.4's firmware only accepts control commands through the Gizwits cloud, so we need your Gizwits Aqua app login.\n\nThis is the same email + password you use to sign in to the Jebao Aqua mobile app. Region is usually US.",
+        "title": "Jebao MD-4.4 Doser",
+        "description": "Found {count} dosing pump(s) on your network. Pick the one to add, or choose manual entry.",
         "data": {
-          "username": "Gizwits email",
-          "password": "Gizwits password",
-          "region": "Region (us / eu / cn)"
+          "host": "Pump"
         }
       },
-      "pick": {
-        "title": "Select Doser",
-        "description": "Pick which dosing pump on your account you want to add.",
+      "manual": {
+        "title": "Enter Pump Address",
+        "description": "No pump was found by broadcast, or you chose manual entry.\n\nEnter the IP address of your MD-4.4. Discovery only works when Home Assistant is on the same network segment as the pump.\n\nExample: 192.168.1.100",
         "data": {
-          "did": "Doser"
+          "host": "IP address"
         }
+      },
+      "confirm": {
+        "title": "Discovered Jebao MD-4.4",
+        "description": "A Jebao MD-4.4 dosing pump was found on your network.\n\nAddress: {host}\nMAC: {mac}\nFirmware: {firmware}\n\nAdd it to Home Assistant?"
       }
     },
     "error": {
-      "cannot_connect": "Could not reach the Gizwits cloud. Check your internet connection.",
-      "invalid_auth": "Gizwits cloud rejected those credentials.",
-      "device_not_found": "That doser is no longer visible on this account.",
+      "cannot_connect": "Could not reach a Jebao MD-4.4 at that address. Check the IP and that the pump is powered on and on the same network.",
       "unknown": "An unexpected error occurred"
     },
     "abort": {
-      "already_configured": "This doser is already configured",
-      "no_devices_on_account": "No dosers were found on this Gizwits account."
+      "already_configured": "This pump is already configured",
+      "not_jebao_device": "Not a registered Jebao pump",
+      "unsupported_model": "That pump model is not supported by this integration yet"
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Jebao MD-4.4 Options",
-        "description": "Fallback polling interval, used only when the WebSocket push subscription is not currently connected. With WS up, the integration uses a much longer interval automatically.",
+        "description": "The pump reports changes as they happen, so this interval is only a backstop in case a report is missed. It is local network traffic only.",
         "data": {
-          "scan_interval": "Fallback poll interval (10-300 seconds)"
+          "scan_interval": "Backstop poll interval (30-3600 seconds)"
         }
       }
     }
   },
   "entity": {
     "switch": {
-      "master": { "name": "Master" },
-      "channel_1": { "name": "Channel 1" },
-      "channel_2": { "name": "Channel 2" },
-      "channel_3": { "name": "Channel 3" },
-      "channel_4": { "name": "Channel 4" },
-      "timer_1": { "name": "Timer 1" },
-      "timer_2": { "name": "Timer 2" },
-      "timer_3": { "name": "Timer 3" },
-      "timer_4": { "name": "Timer 4" },
-      "cal_factor_10x": { "name": "10x dose precision" }
+      "master": {
+        "name": "Master"
+      },
+      "channel_1": {
+        "name": "Channel 1"
+      },
+      "channel_2": {
+        "name": "Channel 2"
+      },
+      "channel_3": {
+        "name": "Channel 3"
+      },
+      "channel_4": {
+        "name": "Channel 4"
+      },
+      "timer_1": {
+        "name": "Timer 1"
+      },
+      "timer_2": {
+        "name": "Timer 2"
+      },
+      "timer_3": {
+        "name": "Timer 3"
+      },
+      "timer_4": {
+        "name": "Timer 4"
+      },
+      "cal_factor_10x": {
+        "name": "10x dose precision"
+      }
     },
     "binary_sensor": {
-      "open_circuit": { "name": "Open circuit" },
-      "fault_uart": { "name": "UART fault" }
+      "open_circuit": {
+        "name": "Open circuit"
+      },
+      "fault_uart": {
+        "name": "UART fault"
+      }
     },
     "button": {
-      "sync_time": { "name": "Sync clock" }
+      "sync_time": {
+        "name": "Sync clock"
+      }
     },
     "number": {
-      "interval_1": { "name": "Channel 1 interval" },
-      "interval_2": { "name": "Channel 2 interval" },
-      "interval_3": { "name": "Channel 3 interval" },
-      "interval_4": { "name": "Channel 4 interval" },
-      "dose_input": { "name": "Actual calibration amount" }
+      "interval_1": {
+        "name": "Channel 1 interval"
+      },
+      "interval_2": {
+        "name": "Channel 2 interval"
+      },
+      "interval_3": {
+        "name": "Channel 3 interval"
+      },
+      "interval_4": {
+        "name": "Channel 4 interval"
+      },
+      "dose_input": {
+        "name": "Actual calibration amount"
+      }
     },
     "text": {
-      "schedule_1": { "name": "Channel 1 schedule" },
-      "schedule_2": { "name": "Channel 2 schedule" },
-      "schedule_3": { "name": "Channel 3 schedule" },
-      "schedule_4": { "name": "Channel 4 schedule" }
+      "schedule_1": {
+        "name": "Channel 1 schedule"
+      },
+      "schedule_2": {
+        "name": "Channel 2 schedule"
+      },
+      "schedule_3": {
+        "name": "Channel 3 schedule"
+      },
+      "schedule_4": {
+        "name": "Channel 4 schedule"
+      }
     },
     "sensor": {
-      "calibration_channel": { "name": "Calibration channel" },
-      "calib1": { "name": "Calibration value" },
-      "clock": { "name": "Device clock" },
-      "sched_count_1": { "name": "Channel 1 schedules" },
-      "sched_count_2": { "name": "Channel 2 schedules" },
-      "sched_count_3": { "name": "Channel 3 schedules" },
-      "sched_count_4": { "name": "Channel 4 schedules" },
-      "next_sched_1": { "name": "Channel 1 next dose" },
-      "next_sched_2": { "name": "Channel 2 next dose" },
-      "next_sched_3": { "name": "Channel 3 next dose" },
-      "next_sched_4": { "name": "Channel 4 next dose" },
-      "dose_app_value": { "name": "Calibration amount to enter in app" }
+      "calibration_channel": {
+        "name": "Calibration channel"
+      },
+      "calib1": {
+        "name": "Calibration value"
+      },
+      "clock": {
+        "name": "Device clock"
+      },
+      "sched_count_1": {
+        "name": "Channel 1 schedules"
+      },
+      "sched_count_2": {
+        "name": "Channel 2 schedules"
+      },
+      "sched_count_3": {
+        "name": "Channel 3 schedules"
+      },
+      "sched_count_4": {
+        "name": "Channel 4 schedules"
+      },
+      "next_sched_1": {
+        "name": "Channel 1 next dose"
+      },
+      "next_sched_2": {
+        "name": "Channel 2 next dose"
+      },
+      "next_sched_3": {
+        "name": "Channel 3 next dose"
+      },
+      "next_sched_4": {
+        "name": "Channel 4 next dose"
+      },
+      "dose_app_value": {
+        "name": "Calibration amount to enter in app"
+      }
     }
   }
 }

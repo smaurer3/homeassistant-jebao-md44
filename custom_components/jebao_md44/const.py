@@ -1,58 +1,55 @@
-"""Constants for the Jebao MD-4.4 integration."""
+"""Constants for the Jebao MD-4.4 integration (local control only)."""
 from typing import Final
 
 DOMAIN: Final = "jebao_md44"
 
-# Configuration
+# Configuration keys
+CONF_HOST: Final = "host"
 CONF_DEVICE_ID: Final = "device_id"
 CONF_MODEL: Final = "model"
-CONF_USERNAME: Final = "username"
-CONF_PASSWORD: Final = "password"
-CONF_REGION: Final = "region"
 CONF_DID: Final = "did"
+CONF_MAC: Final = "mac_address"
 
 # Defaults
 DEFAULT_NAME: Final = "Jebao MD-4.4 Doser"
-# Fallback polling interval used only when the WebSocket push subscription
-# isn't currently connected. With WS up, the coordinator uses a much
-# longer interval (see coordinator.PUSH_FALLBACK_POLL_SECONDS).
-DEFAULT_SCAN_INTERVAL: Final = 30  # seconds
+# The pump pushes a status report whenever anything changes, so polling is
+# only a safety net for a missed push or a silently dropped socket.
+DEFAULT_SCAN_INTERVAL: Final = 300  # seconds
 
-# Model identifier — kept as a constant in case future MD-4.4 firmware
-# variants ever need to be distinguished.
 MODEL_MD44: Final = "MD-4.4"
 
-# The MD-4.4's firmware exposes channe1..channe8 / Timer1..8ON /
-# IntervalT1..8 over the cloud — likely because the firmware is shared
-# with an 8-head SKU — but the physical pump body has only 4 outputs.
-# We only surface the four that actually do anything; channels 5..8 read
-# as always-False on a real MD-4.4 and writes to them are silently ignored
-# by the pump.
-MD44_CHANNEL_COUNT: Final = 4
+# Network
+TCP_PORT: Final = 12416
+UDP_DISCOVERY_PORT: Final = 12414
 
-# Gizwits cloud configuration. App ID was extracted from the decompiled
-# Jebao Aqua Android app (com.gizwits.xb, app version 3.3.1). The region
-# map mirrors the routing the official app does based on the user's
-# country code.
-GIZWITS_APP_ID: Final = "c3703c4888ec4736a3a0d9425c321604"
-GIZWITS_REGIONS: Final = {
-    "us": "https://usapi.gizwits.com",
-    "cn": "https://api.gizwits.com",
-    "eu": "https://euapi.gizwits.com",
+# Product keys whose P0 layout matches ``lan_proto.LAYOUT`` (792-byte buffer,
+# 39 writable datapoints, 5 attr_flag bytes). Verified live against
+# 1aa33c38 (4-head WiFi+BLE, ESP32-C3, firmware 04X3000R). 3b181431 declares
+# an identical datapoint set in the vendor app's product list; it is accepted
+# but the layout is confirmed at runtime from the reported P0 length.
+SUPPORTED_PRODUCT_KEYS: Final = {
+    "1aa33c38ba9d4b78a9e7796705b2fad7",
+    "3b181431429e46029f850348869cc66f",
 }
+
+# The MD-4.4's firmware exposes channe1..channe8 / Timer1..8ON /
+# IntervalT1..8 — likely because it is shared with an 8-head SKU — but the
+# physical pump body has only 4 outputs. We only surface the four that do
+# anything; channels 5..8 read as always-False and writes to them are
+# ignored by the pump.
+MD44_CHANNEL_COUNT: Final = 4
 
 # Calibration-factor mode for sub-mL dosing precision.
 #
 # The official app's UI only accepts whole-mL dose values. Users who need
 # finer dosing physically calibrate the pump so it dispenses 1/10th of the
-# value it thinks it's dispensing — i.e. tell the pump during calibration
+# value it thinks it is dispensing — i.e. tell the pump during calibration
 # that it just dispensed 300 mL when it only dispensed 30. After that,
-# every entry of "10" in the app actually doses 1 mL, "14" doses 1.4 mL,
-# etc.
+# every entry of "10" in the app actually doses 1 mL, "14" doses 1.4 mL.
 #
 # This integration mirrors that trick with a per-config-entry toggle: when
 # enabled, the Channel N schedule text entity shows fractional mL values
-# (e.g. 12:00=1.4) and we multiply by 10 before sending to the cloud.
+# (e.g. 12:00=1.4) and we multiply by 10 before writing to the pump.
 OPT_CAL_FACTOR_10X: Final = "cal_factor_10x"
 CAL_FACTOR_ON: Final = 10
 CAL_FACTOR_OFF: Final = 1
@@ -66,14 +63,12 @@ def cal_factor(entry_options: dict) -> int:
 def signal_dose_input_changed(entry_id: str) -> str:
     """Dispatcher signal fired when this entry's Calibration amount value
     changes. Subscribed by the Value-to-enter-in-app sensor so it can
-    re-render immediately without waiting for the coordinator's next
-    polling cycle."""
+    re-render immediately rather than waiting for the next update."""
     return f"jebao_md44_{entry_id}_dose_input_changed"
 
 
 def signal_cal_factor_changed(entry_id: str) -> str:
-    """Dispatcher signal fired when the 10x precision toggle flips for
-    this entry. Subscribed by every schedule text entity (so they switch
-    between integer / decimal display) and by the Value-to-enter-in-app
-    sensor (so its multiplier visibly updates)."""
+    """Dispatcher signal fired when the 10x precision toggle flips for this
+    entry. Subscribed by every schedule text entity (so they switch between
+    integer / decimal display) and by the Value-to-enter-in-app sensor."""
     return f"jebao_md44_{entry_id}_cal_factor_changed"

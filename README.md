@@ -1,25 +1,29 @@
 # Home Assistant — Jebao MD-4.4 Dosing Pump
 
-A Home Assistant integration for the Jebao MD-4.4 4-channel dosing pump,
-controlled through the Gizwits cloud (same backend the official Jebao
-Aqua mobile app uses).
+A **fully local** Home Assistant integration for the Jebao MD-4.4 4-channel
+dosing pump. No cloud account, no internet connection, no vendor servers —
+Home Assistant talks straight to the pump on your own network.
 
 > Looking for the Jebao **MDP-20000 wavemaker**? Use
 > [`jrigling/homeassistant-jebao`](https://github.com/jrigling/homeassistant-jebao)
-> — this integration only handles the doser.
+> — this integration only handles the MD-4.4 doser.
 
-## Why cloud-only
+## How it works
 
-The MD-4.4 firmware accepts state reads over its LAN protocol on
-TCP/12416 but silently drops control writes — the cloud is the only path
-that actually changes the device. This integration:
+The pump speaks the GizWits LAN protocol on TCP port 12416. The integration:
 
-1. Logs in to the Gizwits REST API with your Jebao Aqua app credentials,
-2. Opens a WebSocket subscription for real-time state pushes (~1 s
-   latency end-to-end, no polling), and
-3. Sends control writes over REST. The cloud forwards them to the pump
-   over its existing MQTT channel and pushes the resulting state back to
-   us automatically, so the UI updates near-realtime.
+1. **Finds the pump** by UDP broadcast on port 12414 — no IP to type in, and
+   the reply identifies the exact model.
+2. **Logs in locally.** The pump hands out its own passcode over the LAN, so
+   no cloud-issued credential is involved.
+3. **Receives changes as they happen.** The pump pushes a status report
+   whenever anything changes — including changes you make in the phone app —
+   so Home Assistant updates in about a second without polling. That makes
+   this a `local_push` integration.
+4. **Writes locally** over the same connection.
+
+Polling only happens as a backstop in case a report is missed, and it is
+local network traffic either way.
 
 ## What's exposed
 
@@ -33,19 +37,16 @@ For each MD-4.4 added:
 - **Channel 1..4 interval** — "days to skip" between scheduled doses
 - **Channel 1..4 next dose / schedule count** sensors
 - **Calibration channel / value / device clock** sensors
-- **Sync clock** button — push HA's local time to the pump's MCU
+- **Sync clock** button — push Home Assistant's local time to the pump's MCU
 - **10x dose precision** toggle + calibration calculator helpers
 - **Open circuit / UART fault** binary sensors
 
 ## Actions (services)
 
 For day-to-day editing, the `Channel N schedule` text entity is the
-easiest path — just type a new schedule into the entity and HA writes it
-straight through. The actions below are for automations that need to
-compute schedules dynamically (e.g. "bump the morning dose by 0.1 mL if
-yesterday's pH was low").
-
-Five actions are registered:
+easiest path — just type a new schedule into the entity. The actions below
+are for automations that need to compute schedules dynamically (e.g. "bump
+the morning dose by 0.1 mL if yesterday's pH was low").
 
 | Action | What it does |
 |---|---|
@@ -55,12 +56,11 @@ Five actions are registered:
 | `jebao_md44.get_schedule` | Return the full schedule for one channel. Response action. |
 | `jebao_md44.get_schedule_slot` | Return one entry. Response action — includes `exists: false` if the slot is empty. |
 
-`device_id` is the HA device-registry ID, which the UI device-picker
-fills in for you. If you're hand-writing YAML, you can find it in
-Settings → Devices & Services → click your doser → the URL ends in
+`device_id` is the Home Assistant device-registry ID, which the UI
+device-picker fills in for you. If you're hand-writing YAML, you can find
+it in Settings → Devices & Services → click your doser → the URL ends in
 `.../device/<this-id>`. `channel` is 1..4. `slot` is 1-based and matches
-the order entries appear in the schedule text entity (slot 1 = first
-entry shown).
+the order entries appear in the schedule text entity (slot 1 = first entry).
 
 If the **10x dose precision** toggle is on, all `quantity_ml` values in
 these actions are real mL (e.g. `0.5`). With it off, they're whole mL.
@@ -175,10 +175,6 @@ entries:
 
 ### Full example: nudge tomorrow's dose based on a sensor
 
-A bare-bones "if pH was low yesterday, add 0.1 mL to tomorrow's morning
-dose" automation that reads the current value, adjusts it, and writes
-back:
-
 ```yaml
 alias: pH-aware dose nudge
 trigger:
@@ -223,33 +219,51 @@ action:
 Copy `custom_components/jebao_md44/` into your Home Assistant
 `config/custom_components/` directory and restart.
 
-## Setup flow
+## Setup
 
-1. Enter your Gizwits Aqua app email + password + region (usually `us`)
-2. Pick which doser on your account to add
+Add the integration and it broadcasts for pumps on your network — pick
+yours from the list and you're done. Nothing else to enter.
 
-That's it — the WebSocket subscription starts automatically and you
-should see entities populate immediately.
+If nothing is found (usually because Home Assistant is on a different VLAN
+or subnet to the pump) you'll be asked for the pump's IP address instead.
+Either way, once configured the integration also watches DHCP, so the pump
+is followed automatically if your router gives it a new address.
+
+## Requirements
+
+- The pump must be on your network and reachable on TCP port 12416.
+- Home Assistant should ideally be on the same subnet, so UDP broadcast
+  discovery works. It isn't essential — manual IP entry works fine.
+
+The pump still needs to have been set up on your WiFi at least once using
+the Jebao Aqua app (that's how it gets your WiFi credentials). After that,
+this integration never contacts the vendor's servers, and the pump will
+keep working locally even with no internet connection.
 
 ## Notes
 
-- Tested against current firmware on a US-region account. The Gizwits
-  cloud attribute names this integration speaks to (`channe1`..`channe4`,
-  `Timer1ON`..`Timer4ON`, `IntervalT1`..`IntervalT4`,
-  `CH1SWTime`..`CH4SWTime`, etc.) are the same ones the cloud exposes
-  publicly through its standard `/app/devdata/<did>/latest` and
-  `/app/control/<did>` endpoints — anyone with a Gizwits Aqua account
-  can see them.
-- All writes are sent verbatim every time — no "skip the write if value
-  didn't change" guards. This keeps the cloud-side cache from drifting
-  out of sync with HA.
-- The WS heartbeat is 180 s. Reconnects use exponential backoff
-  (2 → 60 s). If the socket is down the integration falls back to REST
-  polling at the configured interval.
+- Tested against firmware `04X3000R` (ESP32-C3 module) on product key
+  `1aa33c38ba9d4b78a9e7796705b2fad7` — "4-head doser WiFi_BLE". The closely
+  related `3b181431...` declares the same datapoint set and is accepted; the
+  layout is confirmed from the pump's reported buffer length at runtime.
+  If your pump is rejected as unsupported, please open an issue with the
+  product key from the log.
+- All writes are sent in full every time — no "skip the write if the value
+  didn't change" guards. That keeps the pump's state from drifting out of
+  sync with Home Assistant.
+- The **Sync clock** button is the one write whose field interpretation is
+  not fully verified. The pump fires schedules against its own clock, so
+  check the "Device clock" sensor reads correctly after pressing it.
+
+## Upgrading from 1.x
+
+Version 1.x controlled the pump through the GizWits cloud. 2.0 is local-only,
+and the entity IDs are unchanged, but the config entry format is different:
+**remove the integration and add it again.** You will not need your Jebao
+app credentials any more.
 
 ## Credits
 
-The MDP-20000 wavemaker support that lives in
+The MDP-20000 wavemaker support in
 [`jrigling/homeassistant-jebao`](https://github.com/jrigling/homeassistant-jebao)
-was the original inspiration and the base entity layer here was lifted
-from there.
+was the original inspiration, and the base entity layer here started there.

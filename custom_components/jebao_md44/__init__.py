@@ -1,8 +1,7 @@
-"""The Jebao MD-4.4 integration."""
+"""The Jebao MD-4.4 integration — local control over the LAN."""
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 import voluptuous as vol
 
@@ -12,14 +11,13 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 
 from .const import (
     CONF_DID,
-    CONF_PASSWORD,
-    CONF_REGION,
-    CONF_USERNAME,
+    CONF_HOST,
+    CONF_MAC,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MD44_CHANNEL_COUNT,
     MODEL_MD44,
@@ -41,30 +39,20 @@ PLATFORMS: list[Platform] = [
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the MD-4.4 doser from a config entry."""
-    device_id = entry.data.get("device_id")
-    mac_address = entry.data.get("mac_address")
+    host = entry.data[CONF_HOST]
+    did = entry.data.get(CONF_DID)
+    device_id = entry.data.get("device_id") or did or host
+    mac_address = entry.data.get(CONF_MAC)
     firmware_version = entry.data.get("firmware_version")
 
-    _LOGGER.info("Setting up Jebao MD-4.4 (entry %s)", entry.title)
+    _LOGGER.info("Setting up Jebao MD-4.4 at %s", host)
 
-    session = async_get_clientsession(hass)
-    device = MD44Device(
-        session=session,
-        username=entry.data[CONF_USERNAME],
-        password=entry.data[CONF_PASSWORD],
-        region=entry.data.get(CONF_REGION, "us"),
-        did=entry.data[CONF_DID],
-        device_id=device_id,
-    )
+    device = MD44Device(host=host, device_id=device_id, did=did)
     try:
-        await device.connect()
+        await device.connect(timeout=15.0)
     except MD44Error as err:
-        _LOGGER.error("Failed to connect to MD-4.4 %s: %s", device_id, err)
         await device.disconnect()
-        raise ConfigEntryNotReady(f"Failed to connect: {err}") from err
-
-    host = device.host
-    _LOGGER.info("Successfully connected to Jebao MD-4.4")
+        raise ConfigEntryNotReady(f"Cannot reach pump at {host}: {err}") from err
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
@@ -74,8 +62,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "model": MODEL_MD44,
         "mac_address": mac_address,
         "firmware_version": firmware_version,
-        # The schedule-slot services need access to entry.options to read
-        # the 10x precision toggle when converting real mL to raw bytes.
+        # The schedule-slot services read entry.options for the 10x
+        # precision toggle when converting real mL to raw bytes.
         "entry": entry,
         # Default the Calibration-amount slot before platforms load so the
         # paired "Value to enter in app" sensor never reads an empty bucket
@@ -84,29 +72,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         "dose_input": 1.0,
     }
 
-    # Build the coordinator here, before forwarding to platforms, so all
-    # platforms share one. The old "platform creates it if missing" pattern
-    # was racy: ``async_forward_entry_setups`` runs platforms concurrently,
-    # they all see "no coordinator yet", and each spins up its own — six
-    # coordinators all polling on their own schedule. With one coordinator
-    # built up front, every platform just reads it out of hass.data.
+    # Build the coordinator before forwarding to platforms so they all share
+    # one. The "platform creates it if missing" pattern was racy:
+    # async_forward_entry_setups runs platforms concurrently, they all see
+    # "no coordinator yet", and each spins up its own.
     from .coordinator import JebaoDataUpdateCoordinator
 
-    scan_interval = entry.options.get("scan_interval")
-    if scan_interval:
-        coordinator = JebaoDataUpdateCoordinator(
-            hass, device, entry, device_id, scan_interval
-        )
-    else:
-        coordinator = JebaoDataUpdateCoordinator(hass, device, entry, device_id)
+    coordinator = JebaoDataUpdateCoordinator(
+        hass, device, entry, device_id,
+        entry.options.get("scan_interval", DEFAULT_SCAN_INTERVAL),
+    )
     await coordinator.async_config_entry_first_refresh()
     hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    await _async_register_md44_services(hass)
-
+    await _async_register_services(hass)
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 _QTY_ML = vol.All(
@@ -144,7 +130,7 @@ _SET_SLOT_SCHEMA = vol.Schema(
         vol.Required("channel"): _CHANNEL,
         # 1-based across the visible (non-empty) entries of the schedule.
         # Slot 1 = the entry shown first in the text entity. Slots beyond
-        # the current count append as a new entry (provided qty > 0).
+        # the current count append a new entry (provided qty > 0).
         vol.Required("slot"): _SLOT,
         vol.Required("hour"): _HOUR,
         vol.Required("minute"): _MINUTE,
@@ -177,28 +163,25 @@ _GET_SLOT_SCHEMA = vol.Schema(
 
 
 def _find_doser(hass: HomeAssistant, target: str):
-    """Look up the MD44Device + config entry for a service call's device target.
+    """Resolve a service call's device target to ``(device, config_entry)``.
 
-    The device picker in services.yaml passes an HA device-registry ID
-    (a long opaque string). We resolve that to the Gizwits ``did`` by
-    pulling our domain's identifier out of the matched device's
-    ``identifiers`` set, then locate the stored MD44Device.
-
-    Returns ``(device, entry)`` or ``(None, None)`` if nothing matches.
+    The device picker passes an HA device-registry ID, so we pull our
+    domain's identifier out of the matched device and look up the stored
+    MD44Device. Returns ``(None, None)`` if nothing matches.
     """
     registry = dr.async_get(hass)
     ha_device = registry.async_get(target)
     if ha_device is None:
         return None, None
-    gizwits_did: str | None = None
+    our_id: str | None = None
     for domain, identifier in ha_device.identifiers:
         if domain == DOMAIN:
-            gizwits_did = identifier
+            our_id = identifier
             break
-    if gizwits_did is None:
+    if our_id is None:
         return None, None
     for stored in hass.data.get(DOMAIN, {}).values():
-        if stored.get("device_id") == gizwits_did and isinstance(
+        if stored.get("device_id") == our_id and isinstance(
             stored.get("device"), MD44Device
         ):
             return stored["device"], stored.get("entry")
@@ -206,25 +189,20 @@ def _find_doser(hass: HomeAssistant, target: str):
 
 
 def _ml_to_raw(quantity_ml: float, entry) -> int:
-    """Convert the real-mL value the user passed into the raw byte the
-    firmware stores. Applies the 10x precision toggle if it's on for
-    this entry."""
+    """Convert real mL into the raw byte the firmware stores, applying the
+    10x precision toggle if it is on for this entry."""
     factor = cal_factor(entry.options) if entry is not None else 1
     raw = int(round(float(quantity_ml) * factor))
     return max(0, min(255, raw))
 
 
 def _raw_to_ml(raw: int, entry) -> float:
-    """Inverse of ``_ml_to_raw``: scale the firmware's byte back to real
-    mL using the 10x precision toggle. Returned as a float so the value
-    keeps its decimal when the toggle is on."""
+    """Inverse of ``_ml_to_raw``."""
     factor = cal_factor(entry.options) if entry is not None else 1
     return raw / factor if factor != 1 else float(raw)
 
 
 def _entry_to_dict(slot: int, entry_obj, config_entry) -> dict:
-    """Render a ScheduleEntry as a dict suitable for both service-response
-    payloads and entity attributes."""
     return {
         "slot": slot,
         "time": f"{entry_obj.hour:02d}:{entry_obj.minute:02d}",
@@ -240,17 +218,9 @@ def _push_schedule_update(
     channel_idx: int,
     entries: list,
 ) -> None:
-    """Mirror the just-written schedule into the coordinator's data so the
-    Channel N schedule text entity (and the next-dose / count sensors)
-    re-render immediately rather than waiting for the next push.
-
-    The WS subscription may replace ``device.state`` wholesale on each
-    push, while ``coordinator.data["state"]`` keeps pointing at whatever
-    object was current when ``async_set_updated_data`` last fired. Calling
-    ``async_set_updated_data`` here rebinds the coordinator to the now-
-    mutated state and notifies all listeners. The next push from the pump
-    overwrites this once the cloud catches up.
-    """
+    """Mirror a just-written schedule into the coordinator so the schedule
+    text entity and the next-dose / count sensors re-render immediately
+    rather than waiting for the pump's own report."""
     if device.state is not None:
         device.state.schedules[channel_idx] = list(entries)
     for stored in hass.data.get(DOMAIN, {}).values():
@@ -261,7 +231,7 @@ def _push_schedule_update(
             return
 
 
-async def _async_register_md44_services(hass: HomeAssistant) -> None:
+async def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, "set_schedule"):
         return
 
@@ -294,10 +264,8 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
             _LOGGER.error("set_schedule_slot: no MD-4.4 found with device_id %s", target_id)
             return
         raw_qty = _ml_to_raw(call.data["quantity_ml"], entry)
-        # device.state is kept current by the WS push subscription, so we
-        # don't need a pre-write REST poll here. Just bail if push hasn't
-        # populated state yet (only possible in the brief window before the
-        # first push lands after a reconnect).
+        # device.state is kept current by the pump's own status reports, so
+        # no pre-write read is needed.
         if device.state is None:
             _LOGGER.error("set_schedule_slot: device state not ready yet")
             return
@@ -305,14 +273,12 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
         new_entry = ScheduleEntry(hour=hour, minute=minute, quantity=raw_qty)
         if slot_idx < len(entries):
             if raw_qty == 0:
-                # Treat qty=0 as "delete this slot" so the user has one
-                # service to remember.
+                # qty=0 means "delete this slot" so there is one service to
+                # remember for normal edits.
                 entries.pop(slot_idx)
             else:
                 entries[slot_idx] = new_entry
         elif raw_qty > 0:
-            # Past the end → append. Slot index beyond count is fine; we
-            # just add to the next available position.
             if len(entries) >= 24:
                 _LOGGER.error(
                     "set_schedule_slot: channel %d already has the max 24 entries",
@@ -321,8 +287,7 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
                 return
             entries.append(new_entry)
         else:
-            # Slot past the end AND qty=0 → nothing to do.
-            return
+            return  # past the end and qty=0 -> nothing to do
         await device.set_schedule(channel - 1, entries)
         _push_schedule_update(hass, device, channel - 1, entries)
 
@@ -340,7 +305,7 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
         entries = list(device.state.schedules[channel - 1])
         if slot_idx >= len(entries):
             _LOGGER.warning(
-                "delete_schedule_slot: channel %d has only %d entries; nothing to delete at slot %d",
+                "delete_schedule_slot: channel %d has only %d entries; nothing at slot %d",
                 channel, len(entries), slot_idx + 1,
             )
             return
@@ -357,11 +322,10 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
                 f"get_schedule: no MD-4.4 found for device {target_id}"
             )
         if device.state is None:
-            # Stale cache — force a read so we don't return a placeholder.
             try:
                 await device.update()
             except MD44Error as err:
-                raise HomeAssistantError(f"get_schedule: cloud read failed: {err}")
+                raise HomeAssistantError(f"get_schedule: read failed: {err}") from err
         entries = device.state.schedules[channel - 1]
         return {
             "channel": channel,
@@ -386,20 +350,14 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
                 await device.update()
             except MD44Error as err:
                 raise HomeAssistantError(
-                    f"get_schedule_slot: cloud read failed: {err}"
-                )
+                    f"get_schedule_slot: read failed: {err}"
+                ) from err
         entries = device.state.schedules[channel - 1]
         if slot_1based - 1 >= len(entries):
-            # Return a present-but-empty result so automations can branch
-            # cleanly on ``exists: false`` rather than having to catch an
-            # error.
-            return {
-                "channel": channel,
-                "slot": slot_1based,
-                "exists": False,
-            }
-        entry_obj = entries[slot_1based - 1]
-        result = _entry_to_dict(slot_1based, entry_obj, entry)
+            # Present-but-empty so automations can branch on ``exists``
+            # instead of catching an error.
+            return {"channel": channel, "slot": slot_1based, "exists": False}
+        result = _entry_to_dict(slot_1based, entries[slot_1based - 1], entry)
         result["channel"] = channel
         result["exists"] = True
         return result
@@ -415,13 +373,11 @@ async def _async_register_md44_services(hass: HomeAssistant) -> None:
     )
     hass.services.async_register(
         DOMAIN, "get_schedule", _handle_get_schedule,
-        schema=_GET_SCHEDULE_SCHEMA,
-        supports_response=SupportsResponse.ONLY,
+        schema=_GET_SCHEDULE_SCHEMA, supports_response=SupportsResponse.ONLY,
     )
     hass.services.async_register(
         DOMAIN, "get_schedule_slot", _handle_get_slot,
-        schema=_GET_SLOT_SCHEMA,
-        supports_response=SupportsResponse.ONLY,
+        schema=_GET_SLOT_SCHEMA, supports_response=SupportsResponse.ONLY,
     )
 
 
@@ -429,9 +385,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         data = hass.data[DOMAIN].pop(entry.entry_id)
-        device = data["device"]
-        await device.disconnect()
-        _LOGGER.info("Disconnected Jebao MD-4.4 %s", data["device_id"])
+        await data["device"].disconnect()
+        _LOGGER.info("Disconnected from Jebao MD-4.4 at %s", data["host"])
     return unload_ok
 
 

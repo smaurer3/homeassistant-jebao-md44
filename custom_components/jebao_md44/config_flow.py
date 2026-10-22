@@ -1,13 +1,9 @@
-"""Config flow for the Jebao MD-4.4 doser.
+"""Config flow for the Jebao MD-4.4 doser (local control).
 
-The pump's firmware doesn't accept LAN writes — control only works
-through the Gizwits cloud — so the flow is two steps:
-
-  1. Collect the user's Gizwits Aqua app email + password + region.
-  2. Pick which doser bound to the account to add.
-
-The same flow handles a future re-auth (e.g. if the user changes their
-Gizwits password). HA will route them through ``async_step_user`` again.
+Setup is entirely local: we broadcast for pumps on the LAN and let the user
+pick one, falling back to manual IP entry if discovery finds nothing (common
+when Home Assistant sits on a different VLAN to the pump). No account or
+cloud connectivity is required at any point.
 """
 from __future__ import annotations
 
@@ -20,131 +16,196 @@ from homeassistant import config_entries
 from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 
 from .const import (
     CONF_DEVICE_ID,
     CONF_DID,
+    CONF_HOST,
+    CONF_MAC,
     CONF_MODEL,
-    CONF_PASSWORD,
-    CONF_REGION,
-    CONF_USERNAME,
+    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
-    GIZWITS_REGIONS,
     MODEL_MD44,
+    SUPPORTED_PRODUCT_KEYS,
 )
-from .gizwits_cloud import GizwitsAuthError, GizwitsCloudClient, GizwitsCloudError
+from .discovery import DiscoveredPump, async_discover
+from .md44 import MD44Device, MD44Error
 
 _LOGGER = logging.getLogger(__name__)
 
 
+async def _probe(host: str) -> MD44Device:
+    """Connect to a candidate host and confirm it answers as an MD-4.4."""
+    device = MD44Device(host=host)
+    try:
+        await device.connect(timeout=10.0)
+        if device.state is None:
+            raise MD44Error("pump did not report any state")
+        return device
+    except Exception:
+        await device.disconnect()
+        raise
+
+
 class JebaoMD44ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Cloud-login config flow for the MD-4.4 doser."""
+    """Local-only config flow."""
 
     VERSION = 1
 
     def __init__(self) -> None:
-        self._username: str | None = None
-        self._password: str | None = None
-        self._region: str = "us"
-        self._devices: list[dict[str, Any]] = []
+        self._found: dict[str, DiscoveredPump] = {}
+        self._discovered: DiscoveredPump | None = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 1: collect Gizwits credentials."""
-        errors: dict[str, str] = {}
-
+        """Broadcast for pumps, then offer a pick list (or manual entry)."""
         if user_input is not None:
-            self._username = user_input[CONF_USERNAME]
-            self._password = user_input[CONF_PASSWORD]
-            self._region = user_input.get(CONF_REGION, "us")
+            if user_input[CONF_HOST] == "__manual__":
+                return await self.async_step_manual()
+            pump = self._found[user_input[CONF_HOST]]
+            return await self._create(pump.host, pump.did, pump.mac, pump.firmware)
 
-            session = async_get_clientsession(self.hass)
-            client = GizwitsCloudClient(session, region=self._region)
-            try:
-                await client.login(self._username, self._password)
-                self._devices = await client.get_bindings()
-            except GizwitsAuthError:
-                errors["base"] = "invalid_auth"
-            except GizwitsCloudError as err:
-                _LOGGER.error("Cloud error: %s", err)
-                errors["base"] = "cannot_connect"
+        pumps = [p for p in await async_discover(timeout=4.0) if p.supported]
+        configured = {e.unique_id for e in self._async_current_entries()}
+        pumps = [p for p in pumps if p.did not in configured]
+        if not pumps:
+            return await self.async_step_manual()
 
-            if not errors:
-                return await self.async_step_pick()
-
+        self._found = {p.did: p for p in pumps}
+        options = [
+            selector.SelectOptionDict(
+                value=p.did, label=f"MD-4.4 at {p.host} ({p.mac_pretty})"
+            )
+            for p in pumps
+        ]
+        options.append(
+            selector.SelectOptionDict(value="__manual__", label="Enter an IP manually")
+        )
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema(
                 {
-                    vol.Required(CONF_USERNAME): str,
-                    vol.Required(CONF_PASSWORD): str,
-                    vol.Required(CONF_REGION, default="us"): vol.In(
-                        list(GIZWITS_REGIONS.keys())
-                    ),
+                    vol.Required(CONF_HOST): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=options,
+                            mode=selector.SelectSelectorMode.LIST,
+                        )
+                    )
                 }
             ),
+            description_placeholders={"count": str(len(pumps))},
+        )
+
+    async def async_step_manual(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Manual IP entry."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            device = None
+            try:
+                device = await _probe(host)
+            except MD44Error as err:
+                _LOGGER.debug("Probe of %s failed: %s", host, err)
+                errors["base"] = "cannot_connect"
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected error probing %s", host)
+                errors["base"] = "unknown"
+            if device is not None:
+                await device.disconnect()
+                # Discovery gives us the DID/MAC; fall back to the host when
+                # the pump could not be reached by broadcast.
+                found = next(
+                    (p for p in await async_discover(timeout=3.0) if p.host == host),
+                    None,
+                )
+                return await self._create(
+                    host,
+                    found.did if found else host,
+                    found.mac if found else None,
+                    found.firmware if found else None,
+                )
+
+        return self.async_show_form(
+            step_id="manual",
+            data_schema=vol.Schema({vol.Required(CONF_HOST): str}),
             errors=errors,
         )
 
-    async def async_step_pick(
+    async def async_step_dhcp(self, discovery_info: DhcpServiceInfo) -> FlowResult:
+        """Recover a configured pump's address after a DHCP change."""
+        mac = discovery_info.macaddress.lower().replace(":", "")
+        for entry in self._async_current_entries():
+            stored = (entry.data.get(CONF_MAC) or "").lower().replace(":", "")
+            if stored and stored == mac:
+                if entry.data.get(CONF_HOST) != discovery_info.ip:
+                    _LOGGER.info(
+                        "DHCP: updating %s address %s -> %s",
+                        entry.title, entry.data.get(CONF_HOST), discovery_info.ip,
+                    )
+                    self.hass.config_entries.async_update_entry(
+                        entry, data={**entry.data, CONF_HOST: discovery_info.ip}
+                    )
+                    self.hass.async_create_task(
+                        self.hass.config_entries.async_reload(entry.entry_id)
+                    )
+                return self.async_abort(reason="already_configured")
+        return self.async_abort(reason="not_jebao_device")
+
+    async def async_step_integration_discovery(
+        self, discovery_info: dict[str, Any]
+    ) -> FlowResult:
+        """A background broadcast found a pump we do not have yet."""
+        if discovery_info.get("product_key") not in SUPPORTED_PRODUCT_KEYS:
+            return self.async_abort(reason="unsupported_model")
+        self._discovered = DiscoveredPump(
+            host=discovery_info["host"],
+            did=discovery_info["did"],
+            mac=discovery_info["mac"],
+            firmware=discovery_info.get("firmware", ""),
+            product_key=discovery_info["product_key"],
+        )
+        await self.async_set_unique_id(self._discovered.did)
+        self._abort_if_unique_id_configured(
+            updates={CONF_HOST: self._discovered.host}
+        )
+        self.context["title_placeholders"] = {"name": f"MD-4.4 ({self._discovered.host})"}
+        return await self.async_step_confirm()
+
+    async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Step 2: pick which doser on the account to add."""
-        errors: dict[str, str] = {}
-
+        assert self._discovered is not None
+        pump = self._discovered
         if user_input is not None:
-            did = user_input[CONF_DID]
-            device = next((d for d in self._devices if d["did"] == did), None)
-            if not device:
-                errors["base"] = "device_not_found"
-            else:
-                await self.async_set_unique_id(did)
-                self._abort_if_unique_id_configured()
-
-                title = device.get("dev_alias") or device.get("product_name") or did
-                return self.async_create_entry(
-                    title=f"MD-4.4 ({title})",
-                    data={
-                        CONF_USERNAME: self._username,
-                        CONF_PASSWORD: self._password,
-                        CONF_REGION: self._region,
-                        CONF_DID: did,
-                        CONF_DEVICE_ID: did,
-                        CONF_MODEL: MODEL_MD44,
-                        "mac_address": device.get("mac"),
-                        "firmware_version": device.get("wifi_soft_version"),
-                    },
-                )
-
-        if not self._devices:
-            return self.async_abort(reason="no_devices_on_account")
-
-        options = [
-            selector.SelectOptionDict(
-                value=d["did"],
-                label=(
-                    f"{d.get('dev_alias') or d.get('product_name') or 'Unknown'} "
-                    f"({d['did']})"
-                ),
-            )
-            for d in self._devices
-        ]
-
+            return await self._create(pump.host, pump.did, pump.mac, pump.firmware)
         return self.async_show_form(
-            step_id="pick",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_DID): selector.SelectSelector(
-                        selector.SelectSelectorConfig(
-                            options=options,
-                            mode=selector.SelectSelectorMode.DROPDOWN,
-                        )
-                    ),
-                }
-            ),
-            errors=errors,
+            step_id="confirm",
+            description_placeholders={
+                "host": pump.host,
+                "mac": pump.mac_pretty,
+                "firmware": pump.firmware or "unknown",
+            },
+        )
+
+    async def _create(
+        self, host: str, did: str, mac: str | None, firmware: str | None
+    ) -> FlowResult:
+        await self.async_set_unique_id(did)
+        self._abort_if_unique_id_configured(updates={CONF_HOST: host})
+        return self.async_create_entry(
+            title=f"MD-4.4 ({host})",
+            data={
+                CONF_HOST: host,
+                CONF_DID: did,
+                CONF_DEVICE_ID: did,
+                CONF_MODEL: MODEL_MD44,
+                CONF_MAC: mac,
+                "firmware_version": firmware,
+            },
         )
 
     @staticmethod
@@ -156,11 +217,11 @@ class JebaoMD44ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class JebaoMD44OptionsFlow(config_entries.OptionsFlow):
-    """Options flow.
+    """Options: how often to poll as a backstop.
 
-    Only useful knob right now is the fallback poll interval — used when
-    the WebSocket subscription isn't currently connected. With WS up,
-    the coordinator uses a much longer interval automatically.
+    The pump pushes changes as they happen, so this only covers a missed
+    push or a silently dropped socket. It is all LAN traffic, so a short
+    interval costs nothing externally.
     """
 
     async def async_step_init(
@@ -168,9 +229,6 @@ class JebaoMD44OptionsFlow(config_entries.OptionsFlow):
     ) -> FlowResult:
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
-
-        from .const import DEFAULT_SCAN_INTERVAL
-
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -180,7 +238,7 @@ class JebaoMD44OptionsFlow(config_entries.OptionsFlow):
                         default=self.config_entry.options.get(
                             "scan_interval", DEFAULT_SCAN_INTERVAL
                         ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=10, max=300)),
+                    ): vol.All(vol.Coerce(int), vol.Range(min=30, max=3600)),
                 }
             ),
         )
