@@ -251,9 +251,16 @@ keep working locally even with no internet connection.
 - All writes are sent in full every time — no "skip the write if the value
   didn't change" guards. That keeps the pump's state from drifting out of
   sync with Home Assistant.
-- The **Sync clock** button is the one write whose field interpretation is
-  not fully verified. The pump fires schedules against its own clock, so
-  check the "Device clock" sensor reads correctly after pressing it.
+- **The clock.** The pump fires its schedules against its own internal
+  clock, which is set by writing `YMDData` / `HMSData`. Those fields are
+  laid out as `[20, YY, MM, DD]` and `[0, HH, MM, SS]` — byte 0 of the date
+  is the century and byte 0 of the time is reserved (it is *not* a weekday,
+  despite appearances). They are a write-only latch: they hold whatever was
+  last written and never tick, so the pump's running time cannot be read
+  back. Consequently the **Device clock** sensor shows *when the clock was
+  last set* — by this integration or by the official app — not the pump's
+  current time. Press **Sync clock** after setup, and again if you ever
+  suspect drift.
 
 ## Upgrading from 1.x
 

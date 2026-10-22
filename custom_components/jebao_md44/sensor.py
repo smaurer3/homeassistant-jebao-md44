@@ -102,12 +102,17 @@ class MD44Calib1Sensor(JebaoEntity, SensorEntity):
 
 
 class MD44ClockSensor(JebaoEntity, SensorEntity):
-    """The clock the pump's MCU currently believes is "now".
+    """The clock value last written to the pump.
 
-    Both ``YMDData`` and ``HMSData`` come from the cloud as 8-char hex
-    strings (e.g. ``"19050a00"`` = year 25, month 5, day 10, dow 0).
-    The pump returns all zeros until ``Sync clock`` has been pressed,
-    so an unset clock just shows "unset" instead of "2000-00-00".
+    ``YMDData`` / ``HMSData`` are 4-byte fields laid out as
+    ``[20, YY, MM, DD]`` and ``[0, HH, MM, SS]`` — byte 0 of the date is
+    the century and byte 0 of the time is reserved (it is not a weekday).
+
+    These are a write-only latch: they hold whatever was last written and
+    do not tick, so this shows *when the clock was last set* (by this
+    integration or by the official app), not the pump's current time. The
+    pump's running clock is internal and not exposed. All zeros means the
+    clock has never been set, which shows as "unset".
     """
 
     _attr_translation_key = "clock"
@@ -134,12 +139,12 @@ class MD44ClockSensor(JebaoEntity, SensorEntity):
             hms = bytes.fromhex(hms_hex)
         except ValueError:
             return None
-        if len(ymd) < 3 or len(hms) < 3:
+        if len(ymd) < 4 or len(hms) < 4:
             return None
-        year = 2000 + ymd[0]
+        year = ymd[0] * 100 + ymd[1]
         return (
-            f"{year:04d}-{ymd[1]:02d}-{ymd[2]:02d} "
-            f"{hms[0]:02d}:{hms[1]:02d}:{hms[2]:02d}"
+            f"{year:04d}-{ymd[2]:02d}-{ymd[3]:02d} "
+            f"{hms[1]:02d}:{hms[2]:02d}:{hms[3]:02d}"
         )
 
 

@@ -491,18 +491,27 @@ class MD44Device:
         await self._write({attr: _schedule_to_blob(entries)})
 
     async def sync_time(self, now: Optional[dt.datetime] = None) -> None:
-        """Write the pump's clock to local wall-clock time. The pump fires
-        its schedules against this clock, so without a sync it can drift."""
+        """Set the pump's clock to local wall-clock time.
+
+        Encoding, established by reading back what the official app had
+        written and confirming the pump retains our bytes verbatim::
+
+            YMDData = [20, YY, MM, DD]   # byte 0 is the century, not year-2000
+            HMSData = [ 0, HH, MM, SS]   # byte 0 is reserved, NOT a weekday
+
+        Byte 0 of HMSData is not day-of-week: the app had written 0 for a
+        Wednesday. Day-of-week is not part of the schedule model anyway
+        (entries are hour/minute plus an interval-in-days), so nothing
+        depends on it.
+
+        These two datapoints are a write-only latch — they hold whatever
+        was last written and never advance, so the pump's running clock
+        cannot be read back. That means a successful write cannot be
+        verified directly beyond confirming the bytes were stored.
+        """
         if now is None:
             now = dt.datetime.now()
-        ymd = bytes(
-            [
-                (now.year - 2000) & 0xFF,
-                now.month,
-                now.day,
-                now.isoweekday() % 7,   # firmware uses Sun=0
-            ]
-        ).hex()
-        hms = bytes([now.hour, now.minute, now.second, 0]).hex()
-        _LOGGER.info("MD-4.4: syncing clock to %s", now.isoformat(timespec="seconds"))
+        ymd = bytes([20, now.year - 2000, now.month, now.day]).hex()
+        hms = bytes([0, now.hour, now.minute, now.second]).hex()
+        _LOGGER.info("MD-4.4: setting clock to %s", now.isoformat(timespec="seconds"))
         await self._write({"YMDData": ymd, "HMSData": hms})

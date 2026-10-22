@@ -12,5 +12,5 @@
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/smaurer3/homeassistant-jebao-md44/issues",
   "requirements": [],
-  "version": "2.0.0"
+  "version": "2.0.1"
 }
