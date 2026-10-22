@@ -8,7 +8,11 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
+from homeassistant.exceptions import (
+    ConfigEntryError,
+    ConfigEntryNotReady,
+    HomeAssistantError,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -39,7 +43,16 @@ PLATFORMS: list[Platform] = [
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the MD-4.4 doser from a config entry."""
-    host = entry.data[CONF_HOST]
+    host = entry.data.get(CONF_HOST)
+    if not host:
+        # Entries created by 1.x stored Gizwits cloud credentials and no
+        # address. There is nothing to migrate them to, so say so plainly
+        # instead of failing with a KeyError.
+        raise ConfigEntryError(
+            "This pump was added by version 1.x, which used the Gizwits cloud. "
+            "Version 2 controls the pump locally: please delete this entry and "
+            "add the integration again. No credentials are needed."
+        )
     did = entry.data.get(CONF_DID)
     device_id = entry.data.get("device_id") or did or host
     mac_address = entry.data.get(CONF_MAC)
