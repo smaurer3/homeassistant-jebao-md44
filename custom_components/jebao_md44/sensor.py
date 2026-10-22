@@ -173,15 +173,21 @@ class MD44ScheduleCountSensor(JebaoEntity, SensorEntity):
 class MD44NextScheduleSensor(JebaoEntity, SensorEntity):
     """The next-up schedule entry for one channel, as ``HH:MM (Q mL)``.
 
-    Reports ``Disabled`` when the channel's timer switch is off: the pump
-    only runs a channel's stored schedule while that timer is enabled, so
-    showing a next-dose time would promise a dose that will never happen.
+    Two cases where no dose can actually happen are reported instead of a
+    time, so the sensor never promises a dose that will not be delivered:
+
+    * ``Master off`` — the pump's master switch is off, so nothing doses on
+      any channel. Checked first, since it overrides everything and is the
+      more surprising of the two to discover after the fact.
+    * ``Disabled`` — the master is on but this channel's own timer switch is
+      off, so the pump will not run its stored schedule.
 
     Quantities are scaled by the 10x precision factor, so they read as real
     mL and agree with the channel's schedule text entity.
     """
 
     _attr_icon = "mdi:clock-time-four-outline"
+    STATE_MASTER_OFF = "Master off"
     STATE_DISABLED = "Disabled"
 
     def __init__(self, coordinator, device_id, model, host, idx, entry, mac_address=None, firmware_version=None) -> None:
@@ -210,6 +216,8 @@ class MD44NextScheduleSensor(JebaoEntity, SensorEntity):
         state = self.coordinator.data.get("state")
         if state is None:
             return None
+        if not state.master_on:
+            return self.STATE_MASTER_OFF
         if not state.timers_enabled[self._idx]:
             return self.STATE_DISABLED
         entries = state.schedules[self._idx]
